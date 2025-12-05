@@ -4,6 +4,7 @@ from .camera import ArducamSensor, discover_cameras
 from .csi_camera import CSICamera, list_resolutions
 from .multi_camera import MultiCamera, MultiFrame
 from .rplidar import RPLidarSensor, discover_rplidars
+from .sensor_fusion import SensorFusion, FusedFrame
 
 __all__ = [
     "ArducamSensor",
@@ -14,4 +15,6 @@ __all__ = [
     "MultiFrame",
     "RPLidarSensor",
     "discover_rplidars",
+    "SensorFusion",
+    "FusedFrame",
 ]
