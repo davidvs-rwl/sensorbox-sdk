@@ -1,40 +1,51 @@
-"""CSI Camera Driver for NVIDIA Jetson."""
+"""CSI Camera Driver for NVIDIA Jetson with error handling."""
 
 from typing import Optional, Generator
 import time
 import cv2
+import logging
 
 from ..core.sensor import Sensor
 from ..core.frame import SensorFrame, SensorMetadata, SensorType, FrameType
 
+logger = logging.getLogger(__name__)
 
 # Common resolution presets
 RESOLUTIONS = {
-    "4K": (3280, 2464, 21),      # Max resolution, 21 FPS
-    "1080p": (1920, 1080, 30),   # Full HD
-    "720p": (1280, 720, 60),     # HD, high frame rate
-    "480p": (640, 480, 90),      # Low res, very high FPS
+    "4K": (3280, 2464, 21),
+    "1080p": (1920, 1080, 30),
+    "720p": (1280, 720, 60),
+    "480p": (640, 480, 90),
 }
+
+
+class CameraError(Exception):
+    """Base exception for camera errors."""
+    pass
+
+
+class CameraConnectionError(CameraError):
+    """Raised when camera connection fails."""
+    pass
+
+
+class CameraReadError(CameraError):
+    """Raised when frame read fails."""
+    pass
 
 
 class CSICamera(Sensor):
     """
-    Driver for CSI cameras on NVIDIA Jetson (CAM0, CAM1).
+    Driver for CSI cameras on NVIDIA Jetson with error handling.
+    
+    Features:
+        - Automatic reconnection on failure
+        - Dropped frame detection
+        - Configurable retry behavior
     
     Example:
-        # Basic usage
-        with CSICamera(sensor_id=0) as cam:
-            for frame in cam.stream(duration=5.0):
-                process(frame)
-        
-        # With resolution preset
-        with CSICamera(sensor_id=0, resolution="1080p") as cam:
-            for frame in cam.stream(duration=5.0):
-                process(frame)
-        
-        # With target FPS (throttled)
-        with CSICamera(sensor_id=0) as cam:
-            for frame in cam.stream(duration=5.0, target_fps=15):
+        with CSICamera(sensor_id=0, auto_reconnect=True) as cam:
+            for frame in cam.stream(duration=60.0):
                 process(frame)
     """
     
@@ -46,6 +57,10 @@ class CSICamera(Sensor):
         fps: int = 30,
         flip_method: int = 0,
         resolution: Optional[str] = None,
+        auto_reconnect: bool = True,
+        max_reconnect_attempts: int = 3,
+        reconnect_delay: float = 1.0,
+        max_consecutive_failures: int = 10,
     ):
         """
         Initialize CSI camera.
@@ -57,8 +72,11 @@ class CSICamera(Sensor):
             fps: Capture FPS (ignored if resolution is set)
             flip_method: Image flip (0=none, 2=180°)
             resolution: Preset name ("4K", "1080p", "720p", "480p")
+            auto_reconnect: Automatically reconnect on failure
+            max_reconnect_attempts: Max reconnection attempts
+            reconnect_delay: Delay between reconnection attempts (seconds)
+            max_consecutive_failures: Max consecutive read failures before error
         """
-        # Apply resolution preset if provided
         if resolution:
             if resolution not in RESOLUTIONS:
                 raise ValueError(f"Unknown resolution '{resolution}'. Options: {list(RESOLUTIONS.keys())}")
@@ -69,6 +87,17 @@ class CSICamera(Sensor):
         self._height = height
         self._fps = fps
         self._flip_method = flip_method
+        
+        # Error handling settings
+        self._auto_reconnect = auto_reconnect
+        self._max_reconnect_attempts = max_reconnect_attempts
+        self._reconnect_delay = reconnect_delay
+        self._max_consecutive_failures = max_consecutive_failures
+        
+        # Stats
+        self._consecutive_failures = 0
+        self._total_frames = 0
+        self._dropped_frames = 0
         
         super().__init__(
             sensor_id=f"csi_camera_{sensor_id}",
@@ -103,16 +132,43 @@ class CSICamera(Sensor):
     def gstreamer_pipeline(self) -> str:
         return self._build_gstreamer_pipeline()
     
+    @property
+    def stats(self) -> dict:
+        """Get camera statistics."""
+        return {
+            "total_frames": self._total_frames,
+            "dropped_frames": self._dropped_frames,
+            "drop_rate": self._dropped_frames / max(1, self._total_frames),
+        }
+    
     def connect(self) -> None:
-        """Connect to the camera."""
+        """Connect to the camera with retry logic."""
         if self._connected:
             return
         
+        last_error = None
+        for attempt in range(self._max_reconnect_attempts):
+            try:
+                self._do_connect()
+                logger.info(f"Camera {self._csi_sensor_id} connected successfully")
+                return
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Camera {self._csi_sensor_id} connection attempt {attempt + 1} failed: {e}")
+                if attempt < self._max_reconnect_attempts - 1:
+                    time.sleep(self._reconnect_delay)
+        
+        raise CameraConnectionError(
+            f"Failed to connect to camera {self._csi_sensor_id} after {self._max_reconnect_attempts} attempts: {last_error}"
+        )
+    
+    def _do_connect(self) -> None:
+        """Internal connection logic."""
         pipeline = self._build_gstreamer_pipeline()
         self._capture = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
         
         if not self._capture.isOpened():
-            raise ConnectionError(
+            raise CameraConnectionError(
                 f"Failed to open CSI camera {self._csi_sensor_id}. "
                 f"Check connection and run: nvgstcapture-1.0 --sensor-id={self._csi_sensor_id}"
             )
@@ -130,9 +186,11 @@ class CSICamera(Sensor):
                 "flip_method": self._flip_method,
             },
         )
+        
         self._connected = True
         self._sequence_number = 0
         self._time_offset = None
+        self._consecutive_failures = 0
     
     def disconnect(self) -> None:
         """Disconnect from the camera."""
@@ -140,15 +198,58 @@ class CSICamera(Sensor):
             self._capture.release()
             self._capture = None
         self._connected = False
+        logger.info(f"Camera {self._csi_sensor_id} disconnected. Stats: {self.stats}")
+    
+    def reconnect(self) -> bool:
+        """
+        Attempt to reconnect to the camera.
+        
+        Returns:
+            True if reconnection successful, False otherwise
+        """
+        logger.info(f"Attempting to reconnect camera {self._csi_sensor_id}...")
+        self.disconnect()
+        try:
+            self.connect()
+            return True
+        except CameraConnectionError:
+            return False
     
     def read(self) -> Optional[SensorFrame]:
-        """Read a single frame from the camera."""
+        """Read a single frame with error handling."""
         if not self._connected:
             raise RuntimeError(f"Camera {self._sensor_id} is not connected")
         
         ret, frame = self._capture.read()
+        
         if not ret or frame is None:
+            self._consecutive_failures += 1
+            self._dropped_frames += 1
+            
+            logger.warning(f"Camera {self._csi_sensor_id} frame read failed "
+                          f"({self._consecutive_failures} consecutive)")
+            
+            # Try reconnection if enabled
+            if self._consecutive_failures >= self._max_consecutive_failures:
+                if self._auto_reconnect:
+                    if self.reconnect():
+                        self._consecutive_failures = 0
+                        return self.read()  # Retry after reconnect
+                    else:
+                        raise CameraReadError(
+                            f"Camera {self._csi_sensor_id} failed after reconnection attempt"
+                        )
+                else:
+                    raise CameraReadError(
+                        f"Camera {self._csi_sensor_id} exceeded max consecutive failures "
+                        f"({self._max_consecutive_failures})"
+                    )
+            
             return None
+        
+        # Success - reset failure counter
+        self._consecutive_failures = 0
+        self._total_frames += 1
         
         timestamp, wall_time = self._get_timestamp()
         return SensorFrame(
@@ -168,26 +269,7 @@ class CSICamera(Sensor):
         max_frames: Optional[int] = None,
         target_fps: Optional[float] = None,
     ) -> Generator[SensorFrame, None, None]:
-        """
-        Stream frames from the camera with optional FPS limiting.
-        
-        Args:
-            duration: Maximum duration in seconds (None = infinite)
-            max_frames: Maximum number of frames (None = infinite)
-            target_fps: Target frame rate (None = no limit, use camera FPS)
-        
-        Yields:
-            SensorFrame for each captured frame
-        
-        Example:
-            # Stream at full speed
-            for frame in cam.stream(duration=5.0):
-                process(frame)
-            
-            # Stream at 10 FPS (throttled)
-            for frame in cam.stream(duration=5.0, target_fps=10):
-                process(frame)
-        """
+        """Stream frames with FPS limiting and error recovery."""
         if not self._connected:
             raise RuntimeError(f"Sensor {self._sensor_id} is not connected")
         
@@ -212,18 +294,21 @@ class CSICamera(Sensor):
                 current_time = time.monotonic()
                 time_since_last = current_time - last_frame_time
                 if time_since_last < frame_interval:
-                    # Sleep for remaining time (minus a small buffer)
                     sleep_time = frame_interval - time_since_last - 0.001
                     if sleep_time > 0:
                         time.sleep(sleep_time)
                     continue
             
-            # Read frame
-            frame = self.read()
-            if frame is not None:
-                frame_count += 1
-                last_frame_time = time.monotonic()
-                yield frame
+            # Read frame with error handling
+            try:
+                frame = self.read()
+                if frame is not None:
+                    frame_count += 1
+                    last_frame_time = time.monotonic()
+                    yield frame
+            except CameraReadError as e:
+                logger.error(f"Stream error: {e}")
+                break
 
 
 def list_resolutions() -> dict:

@@ -3,50 +3,171 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A Python SDK for ingesting synchronized data from Arducams and RPLIDAR sensors. Built for robotics, autonomous systems, and multi-sensor data collection.
+A Python SDK for synchronized multi-sensor data capture on NVIDIA Jetson. Supports CSI cameras and RPLIDAR laser scanners.
 
 ## Features
 
-- 🎥 **Arducam Support** — USB UVC cameras via OpenCV
-- 📡 **RPLIDAR Support** — A1/A2/A3 laser scanners *(coming soon)*
-- 🔄 **Unified Frame Format** — Consistent data structure across all sensor types
-- ⏱️ **Time Synchronization** — Aligned timestamps for multi-sensor fusion
-- 💾 **HDF5 Storage** — Efficient, chunked dataset storage *(coming soon)*
+- 🎥 **Dual CSI Cameras** — IMX219, IMX477 support via GStreamer
+- 📡 **RPLIDAR** — A1/A2/A3 360° laser scanners
+- 🔄 **Sensor Fusion** — Synchronized multi-sensor streaming
+- 🛡️ **Error Handling** — Auto-reconnection, dropped frame detection
+- ⏱️ **FPS Control** — Configurable target frame rates
 
 ## Installation
-
 ```bash
 git clone https://github.com/davidvs-rwl/sensorbox-sdk.git
 cd sensorbox-sdk
 pip install -e .
 ```
 
+**Note:** On Jetson, use system OpenCV (not pip) for GStreamer support:
+```bash
+pip uninstall opencv-python
+sudo apt install python3-opencv
+pip install "numpy<2"
+```
+
 ## Quick Start
 
+### Single Camera
 ```python
-from sensorbox import ArducamSensor, discover_cameras
+from sensorbox.drivers.csi_camera import CSICamera
 
-# Discover cameras
-cameras = discover_cameras()
-print(f"Found {len(cameras)} cameras")
-
-# Stream from a camera
-with ArducamSensor(device_index=0) as camera:
-    for frame in camera.stream(duration=5.0):
+with CSICamera(sensor_id=0, resolution="720p") as cam:
+    for frame in cam.stream(duration=5.0, target_fps=30):
         print(f"Frame {frame.sequence_number}: {frame.shape}")
 ```
 
-## Command Line
+### Dual Cameras
+```python
+from sensorbox.drivers.multi_camera import MultiCamera
 
+with MultiCamera([0, 1]) as cams:
+    for multi_frame in cams.stream(duration=5.0):
+        cam0 = multi_frame[0]
+        cam1 = multi_frame[1]
+```
+
+### RPLIDAR
+```python
+from sensorbox.drivers.rplidar import RPLidarSensor
+
+with RPLidarSensor('/dev/ttyUSB0') as lidar:
+    for frame in lidar.stream(max_frames=10):
+        scan = frame.data  # (N, 3) array: angle, distance, quality
+        print(f"Scan: {len(scan)} points")
+```
+
+### Multi-Sensor Fusion
+```python
+from sensorbox.drivers.sensor_fusion import SensorFusion
+
+fusion = SensorFusion(
+    camera_ids=[0, 1],
+    lidar_port='/dev/ttyUSB0',
+)
+
+with fusion:
+    for frame in fusion.stream(duration=10.0, target_fps=10):
+        cam0 = frame.camera(0)
+        cam1 = frame.camera(1)
+        if frame.has_lidar:
+            scan = frame.lidar.data
+```
+
+## Command Line Examples
 ```bash
 # Discover cameras
-python examples/camera_capture.py --discover
+python examples/csi_capture.py --list-resolutions
 
-# Capture for 10 seconds
-python examples/camera_capture.py --duration 10
+# Capture from CSI camera
+python examples/csi_capture.py --duration 5 --resolution 720p
 
-# Save frames
-python examples/camera_capture.py --duration 5 --output ./captures
+# Capture from RPLIDAR
+python examples/rplidar_capture.py --scans 20
+
+# Multi-sensor capture
+python examples/multi_sensor_capture.py --duration 10 --output ./captures
+```
+
+## Hardware Setup
+
+### Jetson Camera Configuration
+
+Enable cameras using:
+```bash
+sudo /opt/nvidia/jetson-io/jetson-io.py
+```
+
+Select the appropriate configuration:
+- **Camera IMX219-A** — Single IMX219 on CAM0
+- **Camera IMX219 Dual** — Two IMX219 cameras
+- **Camera IMX219-A and IMX477-C** — IMX219 on CAM0, IMX477 on CAM1
+
+### RPLIDAR
+
+Connect via USB. The device appears as `/dev/ttyUSB0`.
+
+Add user to dialout group for serial access:
+```bash
+sudo usermod -a -G dialout $USER
+```
+
+## API Reference
+
+### CSICamera
+```python
+CSICamera(
+    sensor_id=0,              # CSI port (0 or 1)
+    resolution="720p",        # "4K", "1080p", "720p", "480p"
+    auto_reconnect=True,      # Reconnect on failure
+)
+```
+
+### RPLidarSensor
+```python
+RPLidarSensor(
+    port='/dev/ttyUSB0',      # Serial port
+    auto_reconnect=True,      # Reconnect on failure
+)
+```
+
+### SensorFusion
+```python
+SensorFusion(
+    camera_ids=[0, 1],        # Camera IDs to use
+    lidar_port='/dev/ttyUSB0', # LIDAR port (None to disable)
+    camera_width=1280,
+    camera_height=720,
+)
+```
+
+## Testing
+```bash
+# Unit tests only
+pytest tests/ -m "not hardware" -v
+
+# All tests (requires hardware)
+pytest tests/ -v
+```
+
+## Project Structure
+```
+sensorbox-sdk/
+├── sensorbox/
+│   ├── core/
+│   │   ├── frame.py          # SensorFrame dataclass
+│   │   └── sensor.py         # Base Sensor class
+│   └── drivers/
+│       ├── csi_camera.py     # CSI camera driver
+│       ├── rplidar.py        # RPLIDAR driver
+│       ├── multi_camera.py   # Multi-camera streaming
+│       └── sensor_fusion.py  # Camera + LIDAR fusion
+├── examples/
+│   ├── csi_capture.py
+│   ├── rplidar_capture.py
+│   └── multi_sensor_capture.py
+└── tests/
 ```
 
 ## License
