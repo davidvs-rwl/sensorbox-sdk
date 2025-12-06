@@ -1,7 +1,7 @@
 [project]
 name = "sensorbox-sdk"
 version = "0.1.0"
-description = "SDK for ingesting data from Arducams and RPLIDAR sensors"
+description = "SDK for multi-sensor data collection on NVIDIA Jetson"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -19,9 +19,7 @@ dev = [
 ]
 dashboard = [
     "streamlit>=1.28.0",
-]
-desktop = [
-    "opencv-python>=4.8.0",
+    "plotly>=5.18.0",
 ]
 
 [project.scripts]
@@ -30,6 +28,9 @@ sensorbox = "sensorbox.cli:main"
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sensorbox*"]
 
 [tool.ruff]
 line-length = 100
