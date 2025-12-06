@@ -173,3 +173,53 @@ sensorbox-sdk/
 ## License
 
 MIT
+
+## Quick Start Guide
+
+### 1. Record Data
+```bash
+cd ~/sensorbox-sdk
+
+# Basic recording (10 seconds)
+sensorbox record -t 10 -o my_recording.h5
+
+# Longer recording with name
+sensorbox record -t 60 --name "warehouse" -o warehouse.h5
+
+# Fast recording (no compression)
+sensorbox record -t 30 --no-compression -o fast.h5
+
+# Cameras only (no LIDAR)
+sensorbox record -t 10 --no-lidar -o cameras.h5
+```
+
+### 2. Check Recording
+```bash
+# Show recording info
+sensorbox playback my_recording.h5 --info
+
+# View frames
+sensorbox playback my_recording.h5 --frames 20
+```
+
+### 3. Launch Dashboard
+```bash
+cd ~/sensorbox-sdk
+streamlit run sensorbox/dashboard/app.py --server.headless true --server.port 8501
+```
+
+Then open in browser: **http://192.168.50.163:8501**
+
+Press `Ctrl+C` to stop the dashboard.
+
+### CLI Options Reference
+
+| Command | Description |
+|---------|-------------|
+| `sensorbox record -t 30` | Record 30 seconds |
+| `sensorbox record --fps 5` | Record at 5 FPS |
+| `sensorbox record --no-compression` | Faster, larger files |
+| `sensorbox record --no-lidar` | Cameras only |
+| `sensorbox playback file.h5 --info` | Show file info |
+| `sensorbox info` | Show connected sensors |
+| `sensorbox export file.h5 -o ./images` | Export to JPGs/CSV |
