@@ -36,11 +36,23 @@ class OakDPro(Sensor):
         depth_enabled: bool = True,
         imu_enabled: bool = True,
         fps: float = 30.0,
+        depth_preset: str = "DEFAULT",
+        depth_size: tuple = (640, 400),
+        median_filter: int = 0,
+        confidence_threshold: int = 200,
+        enable_ir: bool = False,
+        ir_brightness: int = 800,
     ):
         self._rgb_size = rgb_size
         self._depth_enabled = depth_enabled
         self._imu_enabled = imu_enabled
         self._fps = fps
+        self._depth_preset = depth_preset
+        self._depth_size = depth_size
+        self._median_filter = median_filter
+        self._confidence_threshold = confidence_threshold
+        self._enable_ir = enable_ir
+        self._ir_brightness = ir_brightness
         
         self._pipeline: Optional[dai.Pipeline] = None
         self._rgb_queue = None
@@ -52,6 +64,27 @@ class OakDPro(Sensor):
             sensor_type=SensorType.CAMERA,
         )
     
+    def _get_depth_preset(self):
+        """Get stereo depth preset."""
+        presets = {
+            "DEFAULT": dai.node.StereoDepth.PresetMode.DEFAULT,
+            "FAST_ACCURACY": dai.node.StereoDepth.PresetMode.FAST_ACCURACY,
+            "FAST_DENSITY": dai.node.StereoDepth.PresetMode.FAST_DENSITY,
+            "HIGH_DETAIL": dai.node.StereoDepth.PresetMode.HIGH_DETAIL,
+            "ROBOTICS": dai.node.StereoDepth.PresetMode.ROBOTICS,
+        }
+        return presets.get(self._depth_preset, presets["DEFAULT"])
+    
+    def _get_median_filter(self):
+        """Get median filter setting."""
+        filters = {
+            0: dai.MedianFilter.MEDIAN_OFF,
+            3: dai.MedianFilter.KERNEL_3x3,
+            5: dai.MedianFilter.KERNEL_5x5,
+            7: dai.MedianFilter.KERNEL_7x7,
+        }
+        return filters.get(self._median_filter, dai.MedianFilter.MEDIAN_OFF)
+    
     def connect(self) -> None:
         if self._connected:
             return
@@ -62,18 +95,20 @@ class OakDPro(Sensor):
             # RGB Camera
             cam = self._pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
             rgb_out = cam.requestOutput(self._rgb_size, dai.ImgFrame.Type.BGR888p, fps=self._fps)
-            
-            # Create RGB queue BEFORE starting
             self._rgb_queue = rgb_out.createOutputQueue()
             
             # Stereo Depth
             if self._depth_enabled:
                 stereo = self._pipeline.create(dai.node.StereoDepth).build(
                     autoCreateCameras=True,
-                    presetMode=dai.node.StereoDepth.PresetMode.DEFAULT,
-                    size=(640, 400),
+                    presetMode=self._get_depth_preset(),
+                    size=self._depth_size,
                     fps=self._fps,
                 )
+                
+                stereo.initialConfig.setMedianFilter(self._get_median_filter())
+                stereo.initialConfig.setConfidenceThreshold(self._confidence_threshold)
+                
                 self._depth_queue = stereo.depth.createOutputQueue()
             
             # IMU
@@ -88,6 +123,14 @@ class OakDPro(Sensor):
             # Start pipeline
             self._pipeline.start()
             
+            # Enable IR projector
+            if self._enable_ir and self._depth_enabled:
+                try:
+                    device = self._pipeline.getDefaultDevice()
+                    device.setIrLaserDotProjectorIntensity(self._ir_brightness / 1200.0)
+                except Exception as e:
+                    print(f"IR projector not available: {e}")
+            
             self._metadata = SensorMetadata(
                 sensor_id=self._sensor_id,
                 sensor_type=SensorType.CAMERA,
@@ -96,8 +139,13 @@ class OakDPro(Sensor):
                 config={
                     "rgb_size": self._rgb_size,
                     "depth_enabled": self._depth_enabled,
+                    "depth_size": self._depth_size,
+                    "depth_preset": self._depth_preset,
+                    "median_filter": self._median_filter,
+                    "confidence_threshold": self._confidence_threshold,
                     "imu_enabled": self._imu_enabled,
                     "fps": self._fps,
+                    "ir_enabled": self._enable_ir,
                 },
             )
             
@@ -123,20 +171,18 @@ class OakDPro(Sensor):
         
         timestamp, wall_time = self._get_timestamp()
         
-        # Get RGB
         rgb = None
         rgb_msg = self._rgb_queue.tryGet()
         if rgb_msg:
             rgb = rgb_msg.getCvFrame()
         
-        # Get Depth
         depth = None
         if self._depth_queue:
             depth_msg = self._depth_queue.tryGet()
             if depth_msg:
-                depth = depth_msg.getFrame()
+                # Rotate 180° to align with RGB camera orientation
+                depth = np.flipud(depth_msg.getFrame())
         
-        # Get IMU
         imu_data = None
         if self._imu_queue:
             imu_msg = self._imu_queue.tryGet()

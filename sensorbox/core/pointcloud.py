@@ -8,56 +8,61 @@ from dataclasses import dataclass
 @dataclass
 class CameraIntrinsics:
     """Camera intrinsic parameters."""
-    fx: float  # Focal length x
-    fy: float  # Focal length y
-    cx: float  # Principal point x
-    cy: float  # Principal point y
+    fx: float
+    fy: float
+    cx: float
+    cy: float
     width: int
     height: int
+    
+    def scale(self, new_width: int, new_height: int) -> "CameraIntrinsics":
+        """Scale intrinsics to a different resolution."""
+        sx = new_width / self.width
+        sy = new_height / self.height
+        return CameraIntrinsics(
+            fx=self.fx * sx,
+            fy=self.fy * sy,
+            cx=self.cx * sx,
+            cy=self.cy * sy,
+            width=new_width,
+            height=new_height,
+        )
 
 
-# Default OAK-D Pro depth camera intrinsics (approximate for 640x400)
-OAKD_DEPTH_INTRINSICS = CameraIntrinsics(
-    fx=380.0,
-    fy=380.0,
-    cx=320.0,
-    cy=200.0,
-    width=640,
-    height=400,
+# OAK-D Pro stereo intrinsics at 640x400 (from calibration)
+OAKD_MONO_640x400 = CameraIntrinsics(
+    fx=400.0, fy=400.0, cx=312.0, cy=192.0, width=640, height=400
 )
+
+
+def get_intrinsics_for_depth(depth_shape: Tuple[int, int]) -> CameraIntrinsics:
+    """Get intrinsics scaled to actual depth resolution."""
+    h, w = depth_shape
+    return OAKD_MONO_640x400.scale(w, h)
 
 
 def depth_to_pointcloud(
     depth: np.ndarray,
     intrinsics: Optional[CameraIntrinsics] = None,
-    max_depth: float = 10000.0,  # mm
+    max_depth: float = 10000.0,
     subsample: int = 1,
 ) -> np.ndarray:
     """
     Convert depth image to 3D point cloud.
     
     Args:
-        depth: Depth image (H, W) in millimeters
-        intrinsics: Camera intrinsic parameters
+        depth: Depth image (H, W) in millimeters (already aligned to RGB)
+        intrinsics: Camera intrinsics (auto-detected if None)
         max_depth: Maximum depth to include (mm)
-        subsample: Subsample factor (1 = all points, 2 = every other, etc.)
+        subsample: Subsample factor
     
     Returns:
         Point cloud as (N, 3) array with X, Y, Z in meters
     """
-    if intrinsics is None:
-        # Auto-detect based on image size
-        h, w = depth.shape
-        intrinsics = CameraIntrinsics(
-            fx=w * 0.6,
-            fy=w * 0.6,
-            cx=w / 2,
-            cy=h / 2,
-            width=w,
-            height=h,
-        )
-    
     h, w = depth.shape
+    
+    if intrinsics is None:
+        intrinsics = get_intrinsics_for_depth(depth.shape)
     
     # Create pixel coordinate grids
     u = np.arange(0, w, subsample)
@@ -71,14 +76,18 @@ def depth_to_pointcloud(
     valid = (z > 0) & (z < max_depth)
     
     # Convert to meters
-    z = z / 1000.0
+    z_m = z / 1000.0
     
     # Back-project to 3D
-    x = (u - intrinsics.cx) * z / intrinsics.fx
-    y = (v - intrinsics.cy) * z / intrinsics.fy
+    x = (u - intrinsics.cx) * z_m / intrinsics.fx
+    y = (v - intrinsics.cy) * z_m / intrinsics.fy
+    
+    # Rotate 180° to match RGB orientation (depth was flipped with flipud)
+    # x = -x  # Not needed
+    y = -y
     
     # Stack and filter
-    points = np.stack([x, y, z], axis=-1)
+    points = np.stack([x, y, z_m], axis=-1)
     points = points[valid]
     
     return points
@@ -93,33 +102,15 @@ def depth_to_colored_pointcloud(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Convert depth image to colored 3D point cloud.
-    
-    Args:
-        depth: Depth image (H, W) in millimeters
-        rgb: RGB image (H, W, 3) - will be resized to match depth
-        intrinsics: Camera intrinsic parameters
-        max_depth: Maximum depth to include (mm)
-        subsample: Subsample factor
-    
-    Returns:
-        Tuple of (points (N, 3), colors (N, 3))
     """
     import cv2
     
-    if intrinsics is None:
-        h, w = depth.shape
-        intrinsics = CameraIntrinsics(
-            fx=w * 0.6,
-            fy=w * 0.6,
-            cx=w / 2,
-            cy=h / 2,
-            width=w,
-            height=h,
-        )
-    
     h, w = depth.shape
     
-    # Resize RGB to match depth if needed
+    if intrinsics is None:
+        intrinsics = get_intrinsics_for_depth(depth.shape)
+    
+    # Resize RGB to match depth
     if rgb.shape[:2] != (h, w):
         rgb_resized = cv2.resize(rgb, (w, h))
     else:
@@ -137,19 +128,21 @@ def depth_to_colored_pointcloud(
     # Filter invalid depths
     valid = (z > 0) & (z < max_depth)
     
-    # Convert depth to meters
-    z = z / 1000.0
+    # Convert to meters
+    z_m = z / 1000.0
     
     # Back-project to 3D
-    x = (u - intrinsics.cx) * z / intrinsics.fx
-    y = (v - intrinsics.cy) * z / intrinsics.fy
+    x = (u - intrinsics.cx) * z_m / intrinsics.fx
+    y = (v - intrinsics.cy) * z_m / intrinsics.fy
+    
+    # Rotate 180° to match RGB orientation
+    # x = -x  # Not needed
+    y = -y
     
     # Stack and filter
-    points = np.stack([x, y, z], axis=-1)
+    points = np.stack([x, y, z_m], axis=-1)
     points = points[valid]
     colors = colors[valid]
-    
-    # Normalize colors to 0-1 range
     colors = colors.astype(np.float32) / 255.0
     
     return points, colors
@@ -160,18 +153,10 @@ def pointcloud_to_ply(
     filepath: str,
     colors: Optional[np.ndarray] = None,
 ) -> None:
-    """
-    Save point cloud to PLY file.
-    
-    Args:
-        points: (N, 3) array of XYZ coordinates
-        filepath: Output .ply file path
-        colors: Optional (N, 3) array of RGB colors (0-1 range)
-    """
+    """Save point cloud to PLY file."""
     n_points = len(points)
     
     with open(filepath, 'w') as f:
-        # Header
         f.write("ply\n")
         f.write("format ascii 1.0\n")
         f.write(f"element vertex {n_points}\n")
@@ -186,7 +171,6 @@ def pointcloud_to_ply(
         
         f.write("end_header\n")
         
-        # Data
         for i in range(n_points):
             x, y, z = points[i]
             if colors is not None:
