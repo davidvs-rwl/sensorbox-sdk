@@ -1,0 +1,19 @@
+{
+  "rgb_fps": 25.72114760057281,
+  "depth_fps": 23.059903008280404,
+  "synced_fps": 22.377398412498344,
+  "read_latency_ms": 4.87781308428805,
+  "memory_mb": 367.80078125,
+  "colorize_ms": 4.05644414126306,
+  "colorize_fps": 345.76861576475665,
+  "pointcloud_sub1_ms": 2.047552469994116,
+  "pointcloud_sub1_fps": 488.3879727892266,
+  "pointcloud_sub2_ms": 0.5606551500011392,
+  "pointcloud_sub2_fps": 1783.6276006703374,
+  "pointcloud_sub4_ms": 0.22379707000027338,
+  "pointcloud_sub4_fps": 4468.333745382719,
+  "total_fps": 26.574609414746934,
+  "capture_ms": 4.957479870964679,
+  "pointcloud_ms": 0.7662069442356328,
+  "total_ms": 9.80545781784405
+}
